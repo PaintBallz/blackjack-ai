@@ -509,5 +509,5 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4):
 if __name__ == "__main__":
     # Tweak iters/depth as you like. More iterations => stronger MCTS.
     # Round count is also adjustable.
-    run_comparison(rounds=50, iters=6000, depth=8, decks=6)
+    run_comparison(rounds=50, iters=3000, depth=8, decks=6)
 

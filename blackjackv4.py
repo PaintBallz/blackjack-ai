@@ -21,7 +21,7 @@ def card_value(rank: str) -> int:
     if rank in ['10','J','Q','K']: return 10
     return int(rank)
 
-def hand_value(cards: tuple[str, ...]) -> tuple[int, bool]:
+def hand_value(cards: Tuple[str, ...]) -> Tuple[int, bool]:
     total = 0
     aces = 0
     for r in cards:
@@ -32,13 +32,10 @@ def hand_value(cards: tuple[str, ...]) -> tuple[int, bool]:
             total += 10
         else:
             total += int(r)
-
-    # if total > 21 while any Ace is 11, flip Ace(s) to 1 (subtract 10 each)
     while total > 21 and aces:
         total -= 10
         aces -= 1
-
-    is_soft = (aces > 0)  # any Ace still valued at 11
+    is_soft = (aces > 0)
     return total, is_soft
 
 def is_blackjack(cards: Tuple[str, ...]) -> bool:
@@ -54,7 +51,7 @@ class BJState:
     player_cards: Tuple[str, ...]
     dealer_cards: Tuple[str, ...]      # (upcard, None) during play; final tuple after resolution
     shoe: Tuple[Tuple[str,int], ...]   # immutable snapshot of remaining shoe
-    base_bet: int                      # static 50
+    base_bet: int                      # static bet (configurable in run_comparison)
     bet_mult: int                      # 1 normally, 2 after DOUBLE
     can_double: bool
     resolved: bool
@@ -101,7 +98,7 @@ class Blackjack:
                 break
             rank, shoe = self._draw_from_shoe(shoe)
             dealer.append(rank)
-        self._round_dealer_hits = tuple(dealer[2:])    # cards drawn after up+hole
+        self._round_dealer_hits = tuple(dealer[2:])
         self._round_final_dealer = tuple(dealer)
 
     # --- rules interface ---
@@ -117,9 +114,7 @@ class Blackjack:
         return s.resolved
 
     def _maybe_resolve_naturals(self, s: BJState) -> BJState:
-        # Player natural
         p_nat = is_blackjack(s.player_cards)
-        # Dealer natural uses committed hole if hidden
         hole = s.dealer_cards[1] if len(s.dealer_cards) > 1 else None
         if hole is None:
             hole = self._round_hole
@@ -135,12 +130,10 @@ class Blackjack:
         player = list(s.player_cards)
 
         if move == A_HIT:
-            # sample one card
             rank, shoe = self._draw_from_shoe(shoe)
             player.append(rank)
             pv, _ = hand_value(tuple(player))
             if pv > 21:
-                # bust -> terminal
                 return replace(s, player_cards=tuple(player),
                                shoe=tuple(sorted(shoe.items())),
                                to_move='Dealer', resolved=True, can_double=False)
@@ -165,25 +158,10 @@ class Blackjack:
     def _dealer_play(self, s: BJState) -> BJState:
         if s.resolved:
             return s
-        
         final = self._round_final_dealer
-
         if final is None:  # safety fallback
             final = (s.dealer_cards[0], self._round_hole)
-
         return replace(s, dealer_cards=final, resolved=True)
-
-        # Dealer hits while total < 17; stands on 17+ (S17)
-        while True:
-            dv, _ = hand_value(tuple(dealer))
-            if dv >= 17:
-                break
-            rank, shoe = self._draw_from_shoe(shoe)
-            dealer.append(rank)
-
-        return replace(s, dealer_cards=tuple(dealer),
-                       shoe=tuple(sorted(shoe.items())),
-                       resolved=True)
 
     # --- payouts ---
     def utility_ev(self, s: BJState) -> float:
@@ -196,7 +174,7 @@ class Blackjack:
         mult = s.bet_mult
         pv, _ = hand_value(s.player_cards)
 
-        # Figure dealer total and natural using committed hole if needed
+        # Dealer tuple using committed hole if needed
         if len(s.dealer_cards) > 1 and s.dealer_cards[1] is not None:
             dealer_tuple = s.dealer_cards
         else:
@@ -261,7 +239,6 @@ def expectiminimax_win(game: Blackjack, state: BJState, depth_limit: int = 6) ->
         # Cutoff heuristic at player node
         if game.is_terminal(s) or (depth <= 0 and s.to_move == 'Player'):
             if not game.is_terminal(s) and s.to_move == 'Player':
-                # Compare standing vs. one-card hit expectation, both scored by win indicator
                 stand_win = game.utility_win(game._dealer_play(replace(s, to_move='Dealer')))
                 hit_exp = 0.0
                 for p, ns in chance_children_hit(s):
@@ -272,7 +249,6 @@ def expectiminimax_win(game: Blackjack, state: BJState, depth_limit: int = 6) ->
                 val = max(stand_win, hit_exp)
                 cache[key] = (val, None)
                 return cache[key]
-            # terminal
             val = game.utility_win(s)
             cache[key] = (val, None)
             return cache[key]
@@ -296,7 +272,7 @@ def expectiminimax_win(game: Blackjack, state: BJState, depth_limit: int = 6) ->
             cache[key] = (best, best_a)
             return cache[key]
 
-        # Dealer turn: deterministic
+        # Dealer turn: deterministic (precomputed)
         ns = game._dealer_play(s)
         v, _ = eval_ev(ns, depth)
         cache[key] = (v, None)
@@ -382,13 +358,11 @@ def rollout_win(game: Blackjack, s: BJState, rng: random.Random) -> float:
             state = game._dealer_play(state)
             break
         pv, soft = hand_value(state.player_cards)
-        # No doubles in win-prob rollouts
         if pv <= 11:
             state = stochastic_step_rng(game, state, A_HIT, rng)
         elif 12 <= pv <= 16:
             up = state.dealer_cards[0]
             upv = 11 if up == 'A' else card_value(up)
-            # vs strong upcard, hit; vs weak upcard 2–6, stand
             if up == 'A' or upv >= 7:
                 state = stochastic_step_rng(game, state, A_HIT, rng)
             else:
@@ -450,7 +424,6 @@ def mcts_core(game: Blackjack,
 
     if not root.children:
         return A_STAND
-    # Pick among max-visits; random tie-break with independent RNG
     maxN = max(ch.N for ch in root.children.values())
     best_actions = [a for a, ch in root.children.items() if ch.N == maxN]
     return rng.choice(best_actions)
@@ -458,37 +431,20 @@ def mcts_core(game: Blackjack,
 # -------- Public distinct MCTS wrappers --------
 
 def mcts_choose_profit(game: Blackjack, root_state: BJState, iters: int) -> str:
-    # Profit: EV reward, aggressive rollout that sometimes doubles
     rng = random.Random(secrets.randbits(64))
     return mcts_core(game, root_state, iters, reward_rollout_fn=rollout_profit, C=math.sqrt(2), rng=rng)
 
 def mcts_choose_win(game: Blackjack, root_state: BJState, iters: int) -> str:
-    # Win%: win-indicator reward, conservative rollout (never double)
     rng = random.Random(secrets.randbits(64))
     return mcts_core(game, root_state, iters, reward_rollout_fn=rollout_win, C=math.sqrt(2), rng=rng)
 
-# -------- Policies (call the distinct wrappers) --------
+# -------- Policies --------
 
 def policy_mcts_profit(game: Blackjack, state: BJState, iters=3000) -> str:
     return mcts_choose_profit(game, state, iters=iters)
 
 def policy_mcts_win(game: Blackjack, state: BJState, iters=3000) -> str:
     return mcts_choose_win(game, state, iters=iters)
-
-
-# Reward functions
-def reward_profit(game: Blackjack, s: BJState) -> float:
-    return game.utility_ev(s)
-
-def reward_win(game: Blackjack, s: BJState) -> float:
-    return game.utility_win(s)
-
-# Policies
-def policy_mcts_profit(game: Blackjack, state: BJState, iters=3000) -> str:
-    return mcts_choose(game, state, iters=iters, reward_fn=reward_profit)
-
-def policy_mcts_win(game: Blackjack, state: BJState, iters=3000) -> str:
-    return mcts_choose(game, state, iters=iters, reward_fn=reward_win)
 
 def policy_expecti_win(game: Blackjack, state: BJState, depth=6) -> str:
     _, a = expectiminimax_win(game, state, depth_limit=depth)
@@ -507,19 +463,14 @@ def play_full_hand(game: Blackjack, start: BJState, chooser) -> Tuple[BJState, L
             break
         a = chooser(game, s)
         actions_taken.append(a)
-        if a == A_HIT:
-            s = stochastic_step(game, s, A_HIT)
-        else:
-            s = game.result(s, a)
+        s = game.result(s, a)  # unified transition (HIT/DOUBLE/STAND)
     return s, actions_taken
 
-def reconstruct_final_dealer(game: Blackjack, final_state: BJState) -> Tuple[str, ...]:
-    if len(final_state.dealer_cards) > 1 and final_state.dealer_cards[1] is not None:
-        return final_state.dealer_cards
-    return (final_state.dealer_cards[0], game._round_hole)
+def reconstruct_final_dealer(game: Blackjack) -> Tuple[str, ...]:
+    return game._round_final_dealer or ('?', '?')
 
 # =========================
-# Tournament: shared dealer, static bet=50, hidden hole
+# Tournament: shared dealer, static bet, hidden hole
 # =========================
 
 def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000, base_bet=50):
@@ -540,11 +491,10 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
         game._round_hole = d2
 
         dealer_public = (d1, None)                 # upcard visible, hole hidden to agents
-        game._precompute_dealer_hand(d1, shoe_after)  # optional: strict shared dealer
-        final_dealer = game._round_final_dealer 
+        game._precompute_dealer_hand(d1, shoe_after)  # strict shared dealer
+        final_dealer = reconstruct_final_dealer(game)
 
-
-        # use the configurable base_bet here
+        # helper: deal one player from a cloned shoe
         def deal_player_from(cloned_shoe):
             p1, cs = game._draw_from_shoe(cloned_shoe)
             p2, cs = game._draw_from_shoe(cs)
@@ -553,7 +503,7 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
                 player_cards=(p1, p2),
                 dealer_cards=dealer_public,
                 shoe=tuple(sorted(cs.items())),
-                base_bet=base_bet,   # <-- configurable static bet
+                base_bet=base_bet,
                 bet_mult=1,
                 can_double=True,
                 resolved=False
@@ -584,7 +534,6 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
         print(f"Dealer (shared) upcard: {dealer_public[0]}   (hole hidden)")
         dv, _ = hand_value(final_dealer)
         print(f"Final dealer hand: {final_dealer} (total={dv})")
-        
 
         def show(tag, start_state, actions, final_state, delta, result):
             sv, _ = hand_value(start_state.player_cards)
@@ -607,10 +556,9 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
         print(f"{tag:13s}   | Stack={stacks[tag]:.2f}   | W-L-P = {w}-{l}-{p}")
 
 if __name__ == "__main__":
-    
     run_comparison(
-        rounds=25,
-        iters=3000,
+        rounds=50,
+        iters=5000,
         depth=6,
         decks=6,
         starting_chips=1000,
