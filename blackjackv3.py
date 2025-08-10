@@ -3,7 +3,7 @@ from dataclasses import dataclass, replace
 from collections import Counter
 import random, math
 from typing import Dict, Tuple, List, Optional, Iterable
-import secrets
+import secrets,random
 
 # =========================
 # Blackjack core
@@ -50,15 +50,17 @@ A_DOUBLE = "DOUBLE"
 
 @dataclass(frozen=True)
 class BJState:
-    to_move: str                       # 'Player' or 'Dealer'
+    to_move: str
     player_cards: Tuple[str, ...]
-    dealer_cards: Tuple[str, ...]      # includes hole card
-    shoe: Tuple[Tuple[str,int], ...]   # immutable Counter snapshot
-    bet: int
+    dealer_cards: Tuple[str, ...]
+    shoe: Tuple[Tuple[str,int], ...]
+    base_bet: int            # chips at stake (50–100), chosen at deal time
+    bet_mult: int            # 1 normally, 2 after DOUBLE
     can_double: bool
     resolved: bool
 
-    def shoe_counter(self) -> Counter:
+    def shoe_counter(self):
+        from collections import Counter
         return Counter(dict(self.shoe))
 
 class Blackjack:
@@ -120,19 +122,25 @@ class Blackjack:
         return s.resolved
 
     def utility_ev(self, s: BJState) -> float:
-        """Payout in base-bet units (+1 win, -1 loss, +1.5 natural, push 0; double scales bet)."""
+        base = s.base_bet
+        mult = s.bet_mult
         pv, _ = hand_value(s.player_cards)
         dv, _ = hand_value(s.dealer_cards)
         p_nat = is_blackjack(s.player_cards)
         d_nat = is_blackjack(s.dealer_cards)
+    
+        # Naturals pay 3:2 on the base bet (no double applies)
         if p_nat or d_nat:
-            if p_nat and not d_nat: return 1.5 * s.bet
-            if d_nat and not p_nat: return -1.0 * s.bet
+            if p_nat and not d_nat: return 1.5 * base
+            if d_nat and not p_nat: return -1.0 * base
             return 0.0
-        if pv > 21: return -1.0 * s.bet
-        if dv > 21: return 1.0 * s.bet
-        if pv > dv: return 1.0 * s.bet
-        if pv < dv: return -1.0 * s.bet
+    
+        # All other outcomes use the (possibly doubled) wager
+        wager = base * mult
+        if pv > 21: return -wager
+        if dv > 21: return +wager
+        if pv > dv: return +wager
+        if pv < dv: return -wager
         return 0.0
 
     def utility_win(self, s: BJState) -> float:
@@ -166,9 +174,12 @@ class Blackjack:
         if move == A_DOUBLE:
             rank, shoe = self._draw_from_shoe(shoe)
             player.append(rank)
-            s2 = replace(s, player_cards=tuple(player),
+            s2 = replace(s,
+                         player_cards=tuple(player),
                          shoe=tuple(sorted(shoe.items())),
-                         bet=2, to_move='Dealer', can_double=False)
+                         bet_mult=2,          # <- was bet=2 before
+                         to_move='Dealer',
+                         can_double=False)
             return self._dealer_play(s2)
 
         if move == A_STAND:
@@ -432,82 +443,87 @@ def clone_state(s: BJState) -> BJState:
     # dataclass is immutable; re-wrap to ensure distinct object identity
     return BJState(s.to_move, s.player_cards, s.dealer_cards, s.shoe, s.bet, s.can_double, s.resolved)
 
-def run_comparison(rounds=10, iters=2500, depth=6, decks=4):
+def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
+                   bet_min=50, bet_max=100):
     game = Blackjack(decks=decks, dealer_hits_soft_17=False)
 
-    stats = {
-        'MCTS-Profit': {'ev':0.0,'win':0,'loss':0,'push':0},
-        'MCTS-Win'   : {'ev':0.0,'win':0,'loss':0,'push':0},
-        'Expecti-Win': {'ev':0.0,'win':0,'loss':0,'push':0},
-    }
+    stacks = {'MCTS-Profit': float(starting_chips),
+              'MCTS-Win'   : float(starting_chips),
+              'Expecti-Win': float(starting_chips)}
+    rec = {k:{'win':0,'loss':0,'push':0} for k in stacks}
 
     for rnd in range(1, rounds+1):
         random.seed(secrets.randbits(64))
         base_shoe = make_shoe(decks)
 
+        # Deal ONE dealer hand (shared)
         d1, shoe_after = game._draw_from_shoe(base_shoe)
         d2, shoe_after = game._draw_from_shoe(shoe_after)
         dealer_cards = (d1, d2)
 
-        def deal_player_from(cloned_shoe):
+        def deal_player_from(cloned_shoe, base_bet):
             p1, cs = game._draw_from_shoe(cloned_shoe)
             p2, cs = game._draw_from_shoe(cs)
             s = BJState(
                 to_move='Player',
                 player_cards=(p1, p2),
-                dealer_cards=dealer_cards,      # <- same dealer for all agents
+                dealer_cards=dealer_cards,
                 shoe=tuple(sorted(cs.items())),
-                bet=1,
+                base_bet=base_bet,   # <- bet size (chips)
+                bet_mult=1,          # <- doubled later if DOUBLE
                 can_double=True,
                 resolved=False
             )
             return game._maybe_resolve_naturals(s)
 
-        shoe1 = shoe_after.copy()
-        shoe2 = shoe_after.copy()
-        shoe3 = shoe_after.copy()
+        # Random bet per agent in [50, 100]
+        bet1 = random.randint(bet_min, bet_max)
+        bet2 = random.randint(bet_min, bet_max)
+        bet3 = random.randint(bet_min, bet_max)
 
-        s1 = deal_player_from(shoe1)  # MCTS-Profit
-        s2 = deal_player_from(shoe2)  # MCTS-Win
-        s3 = deal_player_from(shoe3)  # Expecti-Win
+        s1 = deal_player_from(shoe_after.copy(), bet1)  # MCTS-Profit
+        s2 = deal_player_from(shoe_after.copy(), bet2)  # MCTS-Win
+        s3 = deal_player_from(shoe_after.copy(), bet3)  # Expecti-Win
 
-        # Play out each hand independently (same dealer cards)
         f1, a1 = play_full_hand(game, s1, lambda g, s: policy_mcts_profit(g, s, iters))
         f2, a2 = play_full_hand(game, s2, lambda g, s: policy_mcts_win(g, s, iters))
         f3, a3 = play_full_hand(game, s3, lambda g, s: policy_expecti_win(g, s, depth))
 
-        # Update stats
-        def upd(tag, final_state):
-            ev = game.utility_ev(final_state)
-            stats[tag]['ev'] += ev
-            if ev > 0: stats[tag]['win'] += 1
-            elif ev < 0: stats[tag]['loss'] += 1
-            else: stats[tag]['push'] += 1
+        def settle(tag, final_state):
+            delta = game.utility_ev(final_state)  # chips won/lost this hand
+            if   delta > 0: rec[tag]['win']  += 1;  result = "WIN"
+            elif delta < 0: rec[tag]['loss'] += 1;  result = "LOSS"
+            else:           rec[tag]['push'] += 1;  result = "PUSH"
+            stacks[tag] += delta
+            return delta, result
 
-        upd('MCTS-Profit', f1)
-        upd('MCTS-Win',    f2)
-        upd('Expecti-Win', f3)
+        d1c, r1 = settle('MCTS-Profit', f1)
+        d2c, r2 = settle('MCTS-Win',    f2)
+        d3c, r3 = settle('Expecti-Win', f3)
 
-        # Round output (dealer printed separately) 
+        # Output (show bet size and whether doubled)
         print(f"\n=== Round {rnd} ===")
-        dv,_ = hand_value(dealer_cards)
-        print(f"Dealer: {dealer_cards} (value now unknown to player; totals shown post-round)")
+        print(f"Dealer (shared): {dealer_cards} | final: {f1.dealer_cards}")
 
-        pv1,_ = hand_value(s1.player_cards)
-        pv2,_ = hand_value(s2.player_cards)
-        pv3,_ = hand_value(s3.player_cards)
+        def show(tag, start_state, actions, final_state, delta, result):
+            pv, _ = hand_value(start_state.player_cards)
+            doubled = "(Doubled)" if final_state.bet_mult == 2 else ""
+            print(f"{tag:13s} result={result:5s}  bet={start_state.base_bet} {doubled:9s} "
+                  f"start {start_state.player_cards} ({pv}) | actions {actions} "
+                  f"-> Δchips={delta:+.2f} | stack={stacks[tag]:.2f} | final={final_state.player_cards}")
 
-        print(f"MCTS-Profit    start {s1.player_cards} ({pv1}) | actions {a1} -> EV {game.utility_ev(f1):+0.2f}, final={f1.player_cards} vs {f1.dealer_cards}")
-        print(f"MCTS-Win       start {s2.player_cards} ({pv2}) | actions {a2} -> EV {game.utility_ev(f2):+0.2f}, final={f2.player_cards} vs {f2.dealer_cards}")
-        print(f"Expecti-Win    start {s3.player_cards} ({pv3}) | actions {a3} -> EV {game.utility_ev(f3):+0.2f}, final={f3.player_cards} vs {f3.dealer_cards}")
+        show("MCTS-Profit", s1, a1, f1, d1c, r1)
+        show("MCTS-Win",    s2, a2, f2, d2c, r2)
+        show("Expecti-Win", s3, a3, f3, d3c, r3)
 
-    # Totals
-    print("\n==== Totals ====")
-    for tag, d in stats.items():
-        print(f"{tag:13s} | EV sum={d['ev']:+0.2f} | W-L-P = {d['win']}-{d['loss']}-{d['push']}")
+    print("\n==== Final Chip Stacks ====")
+    for tag in ('MCTS-Profit','MCTS-Win','Expecti-Win'):
+        w, l, p = rec[tag]['win'], rec[tag]['loss'], rec[tag]['push']
+        print(f"{tag:13s} | stack={stacks[tag]:.2f} | W-L-P = {w}-{l}-{p}")
 
 if __name__ == "__main__":
     # Tweak iters/depth as you like. More iterations => stronger MCTS.
-    # Round count is also adjustable.
-    run_comparison(rounds=50, iters=6000, depth=8, decks=6)
+    # Round count are 10 by default and can be adjusted.
+    # Starting chips are 1000 by default and can be adjusted.
+    run_comparison(rounds=50, iters=4000, depth=8, decks=4, starting_chips=1000)
 
