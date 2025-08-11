@@ -13,9 +13,10 @@ The program runs in the console and prints per-round actions, results, chip delt
   - Dealer stands on all 17 (S17).
   - Aces count as 11, then convert to 1 as needed to avoid busting.
   - K/Q/J/10 count as 10.
-  - Actions: HIT, STAND, DOUBLE (no splits).
+  - Actions: HIT, STAND, DOUBLE (no splits), Taking and Skipping Insurance.
   - Naturals (player blackjack) pay 3:2 on the base bet only (double does not apply).
   - If dealer busts and the player ≤ 21, the player wins automatically.
+  - 
 - Shared dealer per roun
   - All agents in a round face the same dealer hand (upcard + committed hole + precompute - hisequence)
   - Dealer’s hole is hidden from agents; it’s revealed in output after play

@@ -5,7 +5,7 @@ import random, math, secrets
 
 # =========================
 # Blackjack core
-# Chips are used as the unit of currency.
+# Insuance Implementation
 # =========================
 
 RANKS = ['2','3','4','5','6','7','8','9','10','J','Q','K','A']
@@ -45,6 +45,8 @@ def is_blackjack(cards: Tuple[str, ...]) -> bool:
 A_HIT = "HIT"
 A_STAND = "STAND"
 A_DOUBLE = "DOUBLE"
+A_INSURANCE = "INSURANCE"           # NEW: take insurance (half bet)
+A_SKIP_INSURANCE = "SKIP_INSURANCE" # NEW: decline insurance
 
 @dataclass(frozen=True)
 class BJState:
@@ -56,6 +58,8 @@ class BJState:
     bet_mult: int                      # 1 normally, 2 after DOUBLE
     can_double: bool
     resolved: bool
+    insurance_bet: int = 0             # 0 if no insurance; otherwise base_bet // 2
+    insurance_allowed: bool = False    # whether insurance decision is pending now
 
     def shoe_counter(self) -> Counter:
         return Counter(dict(self.shoe))
@@ -106,6 +110,9 @@ class Blackjack:
     def actions(self, s: BJState) -> Iterable[str]:
         if self.is_terminal(s) or s.to_move != 'Player':
             return []
+        # If insurance decision is pending, only offer insurance choices
+        if s.insurance_allowed:
+            return [A_INSURANCE, A_SKIP_INSURANCE]
         acts = [A_HIT, A_STAND]
         if s.can_double:
             acts.append(A_DOUBLE)
@@ -115,6 +122,9 @@ class Blackjack:
         return s.resolved
 
     def _maybe_resolve_naturals(self, s: BJState) -> BJState:
+        # Do not resolve naturals until insurance decision has been made (if applicable)
+        if s.insurance_allowed:
+            return s
         p_nat = is_blackjack(s.player_cards)
         hole = s.dealer_cards[1] if len(s.dealer_cards) > 1 else None
         if hole is None:
@@ -130,6 +140,24 @@ class Blackjack:
         shoe = s.shoe_counter()
         player = list(s.player_cards)
 
+        # --- Insurance decision branch ---
+        if move == A_INSURANCE:
+            s2 = replace(
+                s,
+                insurance_bet=s.base_bet // 2,
+                insurance_allowed=False  # decision made; now we may resolve naturals immediately
+            )
+            return self._maybe_resolve_naturals(s2)
+
+        if move == A_SKIP_INSURANCE:
+            s2 = replace(
+                s,
+                insurance_bet=0,
+                insurance_allowed=False
+            )
+            return self._maybe_resolve_naturals(s2)
+
+        # --- Regular actions ---
         if move == A_HIT:
             rank, shoe = self._draw_from_shoe(shoe)
             player.append(rank)
@@ -170,6 +198,7 @@ class Blackjack:
         Returns chip delta for the player:
         - Naturals: +1.5 * base_bet (no double), or -base_bet if dealer natural only.
         - Otherwise: +/- (base_bet * bet_mult) or 0 on push.
+        - Insurance (if taken): pays 2:1 if dealer has blackjack; else it's lost.
         """
         base = s.base_bet
         mult = s.bet_mult
@@ -185,17 +214,28 @@ class Blackjack:
         p_nat = is_blackjack(s.player_cards)
         d_nat = is_blackjack(dealer_tuple)
 
-        if p_nat or d_nat:
-            if p_nat and not d_nat: return 1.5 * base
-            if d_nat and not p_nat: return -1.0 * base
-            return 0.0
+        # Insurance resolution
+        ins = 0.0
+        if s.insurance_bet:
+            ins = (2.0 * s.insurance_bet) if d_nat else (-1.0 * s.insurance_bet)
 
+        # Natural cases (resolved immediately)
+        if p_nat or d_nat:
+            if p_nat and not d_nat:
+                main = 1.5 * base
+            elif d_nat and not p_nat:
+                main = -1.0 * base
+            else:
+                main = 0.0  # both have blackjack -> push main
+            return main + ins
+
+        # Regular play (no naturals)
         wager = base * mult
-        if pv > 21: return -wager
-        if dv > 21: return +wager
-        if pv > dv: return +wager
-        if pv < dv: return -wager
-        return 0.0
+        if pv > 21: return -wager + ins
+        if dv > 21: return +wager + ins
+        if pv > dv: return +wager + ins
+        if pv < dv: return -wager + ins
+        return 0.0 + ins
 
     def utility_win(self, s: BJState) -> float:
         """+1 on win, 0 on push, -1 on loss."""
@@ -240,6 +280,28 @@ def expectiminimax_win(game: Blackjack, state: BJState, depth_limit: int = 6) ->
         # Cutoff heuristic at player node
         if game.is_terminal(s) or (depth <= 0 and s.to_move == 'Player'):
             if not game.is_terminal(s) and s.to_move == 'Player':
+                available = list(game.actions(s))
+                # If insurance decision is pending at cutoff, evaluate both choices,
+                # then from each resulting state approximate by (stand vs hit) heuristic.
+                if A_INSURANCE in available or A_SKIP_INSURANCE in available:
+                    best = -1e9
+                    for a in available:
+                        ns = game.result(s, a)
+                        if game.is_terminal(ns):
+                            v = game.utility_win(ns)
+                        else:
+                            stand_win = game.utility_win(game._dealer_play(replace(ns, to_move='Dealer')))
+                            hit_exp = 0.0
+                            for p, cns in chance_children_hit(ns):
+                                if not cns.resolved and cns.to_move == 'Player':
+                                    hit_exp += p * game.utility_win(game._dealer_play(replace(cns, to_move='Dealer')))
+                                else:
+                                    hit_exp += p * game.utility_win(cns)
+                            v = max(stand_win, hit_exp)
+                        if v > best: best = v
+                    cache[key] = (best, None)
+                    return cache[key]
+                # Otherwise, approximate by stand vs hit from current state
                 stand_win = game.utility_win(game._dealer_play(replace(s, to_move='Dealer')))
                 hit_exp = 0.0
                 for p, ns in chance_children_hit(s):
@@ -321,7 +383,7 @@ def stochastic_step_rng(game: Blackjack, s: BJState, action: str, rng: random.Ra
             return replace(s, player_cards=tuple(player),
                            shoe=tuple(sorted(shoe.items())),
                            to_move='Player', can_double=False)
-    elif action in (A_STAND, A_DOUBLE):
+    elif action in (A_STAND, A_DOUBLE, A_INSURANCE, A_SKIP_INSURANCE):
         return game.result(s, action)
     else:
         raise ValueError("Unknown action")
@@ -329,12 +391,22 @@ def stochastic_step_rng(game: Blackjack, s: BJState, action: str, rng: random.Ra
 # -------- Distinct rollout policies --------
 
 def rollout_profit(game: Blackjack, s: BJState, rng: random.Random) -> float:
-    """Profit-focused rollout: occasionally DOUBLE on 9–11; thresholdy HIT/ STAND."""
+    """Profit-focused rollout: occasionally DOUBLE on 9–11; thresholdy HIT/STAND; insurance: even-money only."""
     state = s
     while not game.is_terminal(state):
         if state.to_move == 'Dealer':
             state = game._dealer_play(state)
             break
+
+        # Respect insurance gate if pending
+        acts = list(game.actions(state))
+        if A_INSURANCE in acts or A_SKIP_INSURANCE in acts:
+            if is_blackjack(state.player_cards):
+                state = stochastic_step_rng(game, state, A_INSURANCE, rng)
+            else:
+                state = stochastic_step_rng(game, state, A_SKIP_INSURANCE, rng)
+            continue
+
         pv, soft = hand_value(state.player_cards)
         if state.can_double and 9 <= pv <= 11 and rng.random() < 0.30:
             state = stochastic_step_rng(game, state, A_DOUBLE, rng)
@@ -352,12 +424,22 @@ def rollout_profit(game: Blackjack, s: BJState, rng: random.Random) -> float:
     return game.utility_ev(state)
 
 def rollout_win(game: Blackjack, s: BJState, rng: random.Random) -> float:
-    """Win-probability rollout: never DOUBLE; bias to avoid busts."""
+    """Win-probability rollout: never DOUBLE; avoid busts; insurance: even-money only."""
     state = s
     while not game.is_terminal(state):
         if state.to_move == 'Dealer':
             state = game._dealer_play(state)
             break
+
+        # Respect insurance gate if pending
+        acts = list(game.actions(state))
+        if A_INSURANCE in acts or A_SKIP_INSURANCE in acts:
+            if is_blackjack(state.player_cards):
+                state = stochastic_step_rng(game, state, A_INSURANCE, rng)
+            else:
+                state = stochastic_step_rng(game, state, A_SKIP_INSURANCE, rng)
+            continue
+
         pv, soft = hand_value(state.player_cards)
         if pv <= 11:
             state = stochastic_step_rng(game, state, A_HIT, rng)
@@ -464,14 +546,14 @@ def play_full_hand(game: Blackjack, start: BJState, chooser) -> Tuple[BJState, L
             break
         a = chooser(game, s)
         actions_taken.append(a)
-        s = game.result(s, a)  # unified transition (HIT/DOUBLE/STAND)
+        s = game.result(s, a)  # unified transition
     return s, actions_taken
 
 def reconstruct_final_dealer(game: Blackjack) -> Tuple[str, ...]:
     return game._round_final_dealer or ('?', '?')
 
 # =========================
-# Tournament: shared dealer, static bet, hidden hole
+# Tournament: shared dealer, static bet, hidden hole, insurance action on A
 # =========================
 
 def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000, base_bet=50):
@@ -491,7 +573,7 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
         d2, shoe_after = game._draw_from_shoe(shoe_after)
         game._round_hole = d2
 
-        dealer_public = (d1, None)                 # upcard visible, hole hidden to agents
+        dealer_public = (d1, None)                    # upcard visible, hole hidden to agents
         game._precompute_dealer_hand(d1, shoe_after)  # strict shared dealer
         final_dealer = reconstruct_final_dealer(game)
 
@@ -499,6 +581,7 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
         def deal_player_from(cloned_shoe):
             p1, cs = game._draw_from_shoe(cloned_shoe)
             p2, cs = game._draw_from_shoe(cs)
+
             s = BJState(
                 to_move='Player',
                 player_cards=(p1, p2),
@@ -507,9 +590,12 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
                 base_bet=base_bet,
                 bet_mult=1,
                 can_double=True,
-                resolved=False
+                resolved=False,
+                insurance_bet=0,
+                insurance_allowed=(dealer_public[0] == 'A')  # only offer when upcard is Ace
             )
-            return game._maybe_resolve_naturals(s)
+            # If insurance is pending, do NOT resolve naturals yet; otherwise, resolve immediately
+            return s if s.insurance_allowed else game._maybe_resolve_naturals(s)
 
         s1 = deal_player_from(shoe_after.copy())  # MCTS-Profit
         s2 = deal_player_from(shoe_after.copy())  # MCTS-Win
@@ -540,9 +626,10 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
             sv, _ = hand_value(start_state.player_cards)
             fv, _ = hand_value(final_state.player_cards)
             doubled = "(Doubled)" if final_state.bet_mult == 2 else ""
+            ins_txt = f" Ins={final_state.insurance_bet}" if final_state.insurance_bet else ""
             print(
-                f"{tag:13s} Result={result:5s}  Bet={start_state.base_bet} {doubled:9s} "
-                f"Start {start_state.player_cards} ({sv}) | Actions {actions} "
+                f"{tag:13s} Result={result:5s}  Bet={start_state.base_bet} {doubled:9s}"
+                f"{ins_txt:>8s} Start {start_state.player_cards} ({sv}) | Actions {actions} "
                 f"-> Chips={delta:+.2f} | Stack={stacks[tag]:.2f} | "
                 f"Final={final_state.player_cards} (Total={fv})"
             )
@@ -558,7 +645,7 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
 
 if __name__ == "__main__":
     run_comparison(
-        rounds=50,
+        rounds=10,
         iters=5000,
         depth=6,
         decks=6,
