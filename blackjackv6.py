@@ -6,7 +6,7 @@ import random, math, secrets
 # =========================
 # Blackjack core
 # Insuance Implementation
-# Different Player Hands for Players
+# Same Player Hands for Players
 # =========================
 
 RANKS = ['2','3','4','5','6','7','8','9','10','J','Q','K','A']
@@ -578,29 +578,34 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
         game._precompute_dealer_hand(d1, shoe_after)  # strict shared dealer
         final_dealer = reconstruct_final_dealer(game)
 
-        # helper: deal one player from a cloned shoe
-        def deal_player_from(cloned_shoe):
-            p1, cs = game._draw_from_shoe(cloned_shoe)
-            p2, cs = game._draw_from_shoe(cs)
+        # ------ SINGLE player deal used for ALL algorithms ------
+        # Draw the player's two cards ONCE so all algorithms get the same starting hand.
+        p1, cs = game._draw_from_shoe(shoe_after)
+        p2, cs = game._draw_from_shoe(cs)
+        common_player_cards = (p1, p2)
+        common_shoe_after_player = tuple(sorted(cs.items()))
+        insurance_gate = (dealer_public[0] == 'A')
 
+        def make_state() -> BJState:
             s = BJState(
                 to_move='Player',
-                player_cards=(p1, p2),
+                player_cards=common_player_cards,
                 dealer_cards=dealer_public,
-                shoe=tuple(sorted(cs.items())),
+                shoe=common_shoe_after_player,   # identical shoe snapshot for all players
                 base_bet=base_bet,
                 bet_mult=1,
                 can_double=True,
                 resolved=False,
                 insurance_bet=0,
-                insurance_allowed=(dealer_public[0] == 'A')  # only offer when upcard is Ace
+                insurance_allowed=insurance_gate
             )
-            # If insurance is pending, do NOT resolve naturals yet; otherwise, resolve immediately
+            # If insurance isn't pending, resolve naturals immediately; otherwise delay.
             return s if s.insurance_allowed else game._maybe_resolve_naturals(s)
 
-        s1 = deal_player_from(shoe_after.copy())  # MCTS-Profit
-        s2 = deal_player_from(shoe_after.copy())  # MCTS-Win
-        s3 = deal_player_from(shoe_after.copy())  # Expecti-Win
+        s1 = make_state()  # MCTS-Profit
+        s2 = make_state()  # MCTS-Win
+        s3 = make_state()  # Expecti-Win
+        # --------------------------------------------------------
 
         f1, a1 = play_full_hand(game, s1, lambda g, s: policy_mcts_profit(g, s, iters))
         f2, a2 = play_full_hand(game, s2, lambda g, s: policy_mcts_win(g, s, iters))
