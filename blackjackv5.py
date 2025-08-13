@@ -646,7 +646,7 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
 
 if __name__ == "__main__":
     run_comparison(
-        rounds=100,
+        rounds=50,
         iters=5000,
         depth=6,
         decks=6,

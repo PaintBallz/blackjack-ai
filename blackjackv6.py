@@ -5,7 +5,7 @@ import random, math, secrets
 
 # =========================
 # Blackjack core
-# Insuance Implementation
+# Insurance Implementation
 # Same Player Hands for Players
 # =========================
 
@@ -46,8 +46,8 @@ def is_blackjack(cards: Tuple[str, ...]) -> bool:
 A_HIT = "HIT"
 A_STAND = "STAND"
 A_DOUBLE = "DOUBLE"
-A_INSURANCE = "INSURANCE"           # NEW: take insurance (half bet)
-A_SKIP_INSURANCE = "SKIP_INSURANCE" # NEW: decline insurance
+A_INSURANCE = "INSURANCE"           # take insurance (half bet)
+A_SKIP_INSURANCE = "SKIP_INSURANCE" # decline insurance
 
 @dataclass(frozen=True)
 class BJState:
@@ -281,28 +281,7 @@ def expectiminimax_win(game: Blackjack, state: BJState, depth_limit: int = 6) ->
         # Cutoff heuristic at player node
         if game.is_terminal(s) or (depth <= 0 and s.to_move == 'Player'):
             if not game.is_terminal(s) and s.to_move == 'Player':
-                available = list(game.actions(s))
-                # If insurance decision is pending at cutoff, evaluate both choices,
-                # then from each resulting state approximate by (stand vs hit) heuristic.
-                if A_INSURANCE in available or A_SKIP_INSURANCE in available:
-                    best = -1e9
-                    for a in available:
-                        ns = game.result(s, a)
-                        if game.is_terminal(ns):
-                            v = game.utility_win(ns)
-                        else:
-                            stand_win = game.utility_win(game._dealer_play(replace(ns, to_move='Dealer')))
-                            hit_exp = 0.0
-                            for p, cns in chance_children_hit(ns):
-                                if not cns.resolved and cns.to_move == 'Player':
-                                    hit_exp += p * game.utility_win(game._dealer_play(replace(cns, to_move='Dealer')))
-                                else:
-                                    hit_exp += p * game.utility_win(cns)
-                            v = max(stand_win, hit_exp)
-                        if v > best: best = v
-                    cache[key] = (best, None)
-                    return cache[key]
-                # Otherwise, approximate by stand vs hit from current state
+                # NOTE: for win agents we ensure insurance is auto-skipped upstream
                 stand_win = game.utility_win(game._dealer_play(replace(s, to_move='Dealer')))
                 hit_exp = 0.0
                 for p, ns in chance_children_hit(s):
@@ -320,7 +299,10 @@ def expectiminimax_win(game: Blackjack, state: BJState, depth_limit: int = 6) ->
         if s.to_move == 'Player':
             best = NEG_INF
             best_a: Optional[str] = None
-            for a in game.actions(s):
+            # Filter actions to HIT/STAND only (DOUBLE/INSURANCE are never considered here)
+            for a in [A_HIT, A_STAND]:
+                if a not in game.actions(s):
+                    continue
                 if a == A_HIT:
                     expv = 0.0
                     for p, ns in chance_children_hit(s):
@@ -425,20 +407,17 @@ def rollout_profit(game: Blackjack, s: BJState, rng: random.Random) -> float:
     return game.utility_ev(state)
 
 def rollout_win(game: Blackjack, s: BJState, rng: random.Random) -> float:
-    """Win-probability rollout: never DOUBLE; avoid busts; insurance: even-money only."""
+    """Win-probability rollout: never DOUBLE; avoid busts; never take or choose insurance."""
     state = s
     while not game.is_terminal(state):
         if state.to_move == 'Dealer':
             state = game._dealer_play(state)
             break
 
-        # Respect insurance gate if pending
+        # If an insurance gate somehow appears, auto-decline (should be handled by runner already)
         acts = list(game.actions(state))
         if A_INSURANCE in acts or A_SKIP_INSURANCE in acts:
-            if is_blackjack(state.player_cards):
-                state = stochastic_step_rng(game, state, A_INSURANCE, rng)
-            else:
-                state = stochastic_step_rng(game, state, A_SKIP_INSURANCE, rng)
+            state = stochastic_step_rng(game, state, A_SKIP_INSURANCE, rng)
             continue
 
         pv, soft = hand_value(state.player_cards)
@@ -528,9 +507,11 @@ def policy_mcts_profit(game: Blackjack, state: BJState, iters=3000) -> str:
     return mcts_choose_profit(game, state, iters=iters)
 
 def policy_mcts_win(game: Blackjack, state: BJState, iters=3000) -> str:
+    # state for win-agent has no double; insurance is skipped by the runner before policy is queried
     return mcts_choose_win(game, state, iters=iters)
 
 def policy_expecti_win(game: Blackjack, state: BJState, depth=6) -> str:
+    # DOUBLE and INSURANCE are excluded for this agent (handled by runner & action filter in expectiminimax)
     _, a = expectiminimax_win(game, state, depth_limit=depth)
     return a or A_STAND
 
@@ -538,13 +519,24 @@ def policy_expecti_win(game: Blackjack, state: BJState, depth=6) -> str:
 # Runner utilities
 # =========================
 
-def play_full_hand(game: Blackjack, start: BJState, chooser) -> Tuple[BJState, List[str]]:
+def play_full_hand(game: Blackjack, start: BJState, chooser, auto_skip_insurance: bool = False) -> Tuple[BJState, List[str]]:
+    """
+    Plays a hand. If auto_skip_insurance=True, any insurance gate is resolved by auto-declining
+    BEFORE asking the agent, so the agent never performs SKIP_INSURANCE or INSURANCE.
+    """
     s = start
     actions_taken: List[str] = []
     while not game.is_terminal(s):
         if s.to_move == 'Dealer':
             s = game._dealer_play(s)
             break
+
+        # For restricted agents, resolve insurance outside the agent
+        if auto_skip_insurance and s.insurance_allowed:
+            s = game.result(s, A_SKIP_INSURANCE)
+            # Not counted as an agent action
+            continue
+
         a = chooser(game, s)
         actions_taken.append(a)
         s = game.result(s, a)  # unified transition
@@ -602,14 +594,18 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
             # If insurance isn't pending, resolve naturals immediately; otherwise delay.
             return s if s.insurance_allowed else game._maybe_resolve_naturals(s)
 
-        s1 = make_state()  # MCTS-Profit
-        s2 = make_state()  # MCTS-Win
-        s3 = make_state()  # Expecti-Win
+        s1 = make_state()  # MCTS-Profit (full rules)
+        s2 = make_state()  # MCTS-Win     (restricted: no insurance, no double)
+        s3 = make_state()  # Expecti-Win  (restricted: no insurance, no double)
+
+        # Disable doubling for the two win-probability agents at the start
+        s2 = replace(s2, can_double=False)
+        s3 = replace(s3, can_double=False)
         # --------------------------------------------------------
 
-        f1, a1 = play_full_hand(game, s1, lambda g, s: policy_mcts_profit(g, s, iters))
-        f2, a2 = play_full_hand(game, s2, lambda g, s: policy_mcts_win(g, s, iters))
-        f3, a3 = play_full_hand(game, s3, lambda g, s: policy_expecti_win(g, s, depth))
+        f1, a1 = play_full_hand(game, s1, lambda g, s: policy_mcts_profit(g, s, iters), auto_skip_insurance=False)
+        f2, a2 = play_full_hand(game, s2, lambda g, s: policy_mcts_win(g, s, iters),   auto_skip_insurance=True)
+        f3, a3 = play_full_hand(game, s3, lambda g, s: policy_expecti_win(g, s, depth), auto_skip_insurance=True)
 
         def settle(tag, final_state):
             delta = game.utility_ev(final_state)
@@ -651,10 +647,10 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
 
 if __name__ == "__main__":
     run_comparison(
-        rounds=500,
-        iters=8000,
+        rounds=100,
+        iters=5000,
         depth=6,
-        decks=8,
+        decks=6,
         starting_chips=1000,
         base_bet=100
     )
