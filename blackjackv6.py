@@ -74,7 +74,7 @@ class Blackjack:
         self._round_dealer_hits: Tuple[str, ...] = ()
         self._round_final_dealer: Optional[Tuple[str, ...]] = None
 
-    # --- dealing & shoes ---
+    # dealing & shoes
     def _draw_from_shoe(self, shoe: Counter, rank: Optional[str] = None) -> Tuple[str, Counter]:
         """Draw specific rank (if provided) or sample proportional to counts."""
         if rank is None:
@@ -107,7 +107,7 @@ class Blackjack:
         self._round_dealer_hits = tuple(dealer[2:])
         self._round_final_dealer = tuple(dealer)
 
-    # --- rules interface ---
+    # rules interface
     def actions(self, s: BJState) -> Iterable[str]:
         if self.is_terminal(s) or s.to_move != 'Player':
             return []
@@ -141,7 +141,7 @@ class Blackjack:
         shoe = s.shoe_counter()
         player = list(s.player_cards)
 
-        # --- Insurance decision branch ---
+        # Insurance decision branch
         if move == A_INSURANCE:
             s2 = replace(
                 s,
@@ -158,7 +158,7 @@ class Blackjack:
             )
             return self._maybe_resolve_naturals(s2)
 
-        # --- Regular actions ---
+        # Regular actions
         if move == A_HIT:
             rank, shoe = self._draw_from_shoe(shoe)
             player.append(rank)
@@ -193,7 +193,7 @@ class Blackjack:
             final = (s.dealer_cards[0], self._round_hole)
         return replace(s, dealer_cards=final, resolved=True)
 
-    # --- payouts ---
+    # payouts 
     def utility_ev(self, s: BJState) -> float:
         """
         Returns chip delta for the player:
@@ -243,9 +243,7 @@ class Blackjack:
         delta = self.utility_ev(s)
         return 1.0 if delta > 0 else (-1.0 if delta < 0 else 0.0)
 
-# =========================
 # Expectiminimax (maximize win probability)
-# =========================
 
 def expectiminimax_win(game: Blackjack, state: BJState, depth_limit: int = 6) -> Tuple[float, Optional[str]]:
     cache: Dict[Tuple[BJState, int], Tuple[float, Optional[str]]] = {}
@@ -326,9 +324,7 @@ def expectiminimax_win(game: Blackjack, state: BJState, depth_limit: int = 6) ->
 
     return eval_ev(state, depth_limit)
 
-# =========================
 # Monte Carlo Tree Search (two distinct variants)
-# =========================
 
 class MCTSNode:
     __slots__ = ("state","parent","children","N","W","untried")
@@ -371,7 +367,7 @@ def stochastic_step_rng(game: Blackjack, s: BJState, action: str, rng: random.Ra
     else:
         raise ValueError("Unknown action")
 
-# -------- Distinct rollout policies --------
+# Distinct rollout policies
 
 def rollout_profit(game: Blackjack, s: BJState, rng: random.Random) -> float:
     """Profit-focused rollout: occasionally DOUBLE on 9–11; thresholdy HIT/STAND; insurance: even-money only."""
@@ -434,7 +430,7 @@ def rollout_win(game: Blackjack, s: BJState, rng: random.Random) -> float:
             state = stochastic_step_rng(game, state, A_STAND, rng)
     return game.utility_win(state)
 
-# -------- Core UCT engine (parametrized) --------
+# Core UCT engine
 
 def mcts_core(game: Blackjack,
               root_state: BJState,
@@ -453,11 +449,9 @@ def mcts_core(game: Blackjack,
         return (child.W / child.N) + C * math.sqrt(math.log(node.N + 1) / child.N)
 
     for _ in range(iters):
-        # 1) Selection
         node = root
         state = node.state
 
-        # Auto-play dealer if needed
         if state.to_move == 'Dealer' and not game.is_terminal(state):
             state = game._dealer_play(state)
             node = MCTSNode(state, node, list(game.actions(state)))
@@ -467,7 +461,6 @@ def mcts_core(game: Blackjack,
             state = stochastic_step_rng(game, state, a, rng)
             node = child
 
-        # 2) Expansion
         if not game.is_terminal(state) and node.untried:
             a = node.untried.pop()
             next_state = stochastic_step_rng(game, state, a, rng)
@@ -476,10 +469,8 @@ def mcts_core(game: Blackjack,
             node = child
             state = next_state
 
-        # 3) Simulation
         reward = reward_rollout_fn(game, state, rng)
 
-        # 4) Backprop
         while node is not None:
             node.N += 1
             node.W += reward
@@ -491,7 +482,7 @@ def mcts_core(game: Blackjack,
     best_actions = [a for a, ch in root.children.items() if ch.N == maxN]
     return rng.choice(best_actions)
 
-# -------- Public distinct MCTS wrappers --------
+# Public distinct MCTS wrappers
 
 def mcts_choose_profit(game: Blackjack, root_state: BJState, iters: int) -> str:
     rng = random.Random(secrets.randbits(64))
@@ -501,7 +492,7 @@ def mcts_choose_win(game: Blackjack, root_state: BJState, iters: int) -> str:
     rng = random.Random(secrets.randbits(64))
     return mcts_core(game, root_state, iters, reward_rollout_fn=rollout_win, C=math.sqrt(2), rng=rng)
 
-# -------- Policies --------
+# Policies
 
 def policy_mcts_profit(game: Blackjack, state: BJState, iters=3000) -> str:
     return mcts_choose_profit(game, state, iters=iters)
@@ -515,9 +506,7 @@ def policy_expecti_win(game: Blackjack, state: BJState, depth=6) -> str:
     _, a = expectiminimax_win(game, state, depth_limit=depth)
     return a or A_STAND
 
-# =========================
 # Runner utilities
-# =========================
 
 def play_full_hand(game: Blackjack, start: BJState, chooser, auto_skip_insurance: bool = False) -> Tuple[BJState, List[str]]:
     """
@@ -545,9 +534,7 @@ def play_full_hand(game: Blackjack, start: BJState, chooser, auto_skip_insurance
 def reconstruct_final_dealer(game: Blackjack) -> Tuple[str, ...]:
     return game._round_final_dealer or ('?', '?')
 
-# =========================
-# Tournament: shared dealer, static bet, hidden hole, insurance action on A
-# =========================
+# Game Policy: shared dealer, static bet, hidden hole, insurance action on A
 
 def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000, base_bet=50):
     game = Blackjack(decks=decks, dealer_hits_soft_17=False)
@@ -601,7 +588,6 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
         # Disable doubling for the two win-probability agents at the start
         s2 = replace(s2, can_double=False)
         s3 = replace(s3, can_double=False)
-        # --------------------------------------------------------
 
         f1, a1 = play_full_hand(game, s1, lambda g, s: policy_mcts_profit(g, s, iters), auto_skip_insurance=False)
         f2, a2 = play_full_hand(game, s2, lambda g, s: policy_mcts_win(g, s, iters),   auto_skip_insurance=True)
