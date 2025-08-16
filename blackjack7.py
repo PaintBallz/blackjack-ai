@@ -367,79 +367,57 @@ def stochastic_step_rng(game: Blackjack, s: BJState, action: str, rng: random.Ra
     else:
         raise ValueError("Unknown action")
 
-# Distinct rollout policies
+# --- Random rollouts (purely random actions until terminal) ---
 
-def rollout_profit(game: Blackjack, s: BJState, rng: random.Random) -> float:
-    """Profit-focused rollout: occasionally DOUBLE on 9–11; thresholdy HIT/STAND; insurance: even-money only."""
+def _random_rollout(game: Blackjack,
+                    s: BJState,
+                    rng: random.Random,
+                    reward_fn) -> float:
+    """
+    Take uniformly random legal actions until the state is terminal.
+    Dealer steps are handled deterministically via _dealer_play.
+    `reward_fn` is either game.utility_ev or game.utility_win.
+    """
     state = s
     while not game.is_terminal(state):
         if state.to_move == 'Dealer':
             state = game._dealer_play(state)
             break
 
-        # Respect insurance gate if pending
         acts = list(game.actions(state))
-        if A_INSURANCE in acts or A_SKIP_INSURANCE in acts:
-            if is_blackjack(state.player_cards):
-                state = stochastic_step_rng(game, state, A_INSURANCE, rng)
-            else:
-                state = stochastic_step_rng(game, state, A_SKIP_INSURANCE, rng)
-            continue
-
-        pv, soft = hand_value(state.player_cards)
-        if state.can_double and 9 <= pv <= 11 and rng.random() < 0.30:
-            state = stochastic_step_rng(game, state, A_DOUBLE, rng)
-        elif pv <= 11:
-            state = stochastic_step_rng(game, state, A_HIT, rng)
-        elif 12 <= pv <= 16:
-            up = state.dealer_cards[0]
-            upv = 11 if up == 'A' else card_value(up)
-            if up == 'A' or upv >= 7:
-                state = stochastic_step_rng(game, state, A_HIT, rng)
-            else:
-                state = stochastic_step_rng(game, state, A_STAND, rng)
-        else:
-            state = stochastic_step_rng(game, state, A_STAND, rng)
-    return game.utility_ev(state)
-
-def rollout_win(game: Blackjack, s: BJState, rng: random.Random) -> float:
-    """Win-probability rollout: never DOUBLE; avoid busts; never take or choose insurance."""
-    state = s
-    while not game.is_terminal(state):
-        if state.to_move == 'Dealer':
+        if not acts:
             state = game._dealer_play(state)
             break
 
-        # If an insurance gate somehow appears, auto-decline (should be handled by runner already)
-        acts = list(game.actions(state))
-        if A_INSURANCE in acts or A_SKIP_INSURANCE in acts:
-            state = stochastic_step_rng(game, state, A_SKIP_INSURANCE, rng)
-            continue
+        a = rng.choice(acts)
+        state = stochastic_step_rng(game, state, a, rng)
 
-        pv, soft = hand_value(state.player_cards)
-        if pv <= 11:
-            state = stochastic_step_rng(game, state, A_HIT, rng)
-        elif 12 <= pv <= 16:
-            up = state.dealer_cards[0]
-            upv = 11 if up == 'A' else card_value(up)
-            if up == 'A' or upv >= 7:
-                state = stochastic_step_rng(game, state, A_HIT, rng)
-            else:
-                state = stochastic_step_rng(game, state, A_STAND, rng)
-        else:
-            state = stochastic_step_rng(game, state, A_STAND, rng)
-    return game.utility_win(state)
+    return reward_fn(state)
 
-# Core UCT engine
+def rollout_random_ev(game: Blackjack, s: BJState, rng: random.Random) -> float:
+    """Random rollout scored by expected chips (EV)."""
+    return _random_rollout(game, s, rng, game.utility_ev)
+
+def rollout_random_win(game: Blackjack, s: BJState, rng: random.Random) -> float:
+    """Random rollout scored by win/loss (+1/0/-1)."""
+    return _random_rollout(game, s, rng, game.utility_win)
+
+# Core UCT engine (with optional debug)
 
 def mcts_core(game: Blackjack,
               root_state: BJState,
               iters: int,
               reward_rollout_fn,              # (game, state, rng) -> scalar
               C: float = math.sqrt(2),
-              rng: Optional[random.Random] = None) -> str:
+              rng: Optional[random.Random] = None,
+              *,
+              debug: bool = False,
+              debug_every: int = 500,
+              reward_metric: str = "ev") -> str:
     """
     Generic UCT with pluggable reward+rollout and independent RNG.
+    Debug mode prints periodic iteration snapshots and final child stats.
+    reward_metric: "ev" or "win" (used only for debug traced rollouts if needed later)
     """
     rng = rng or random.Random(secrets.randbits(64))
     root = MCTSNode(root_state, None, list(game.actions(root_state)))
@@ -448,19 +426,31 @@ def mcts_core(game: Blackjack,
         if child.N == 0: return float('inf')
         return (child.W / child.N) + C * math.sqrt(math.log(node.N + 1) / child.N)
 
-    for _ in range(iters):
+    def print_children_stats(prefix: str):
+        if not root.children:
+            print(f"{prefix} | root has no children yet")
+            return
+        parts = []
+        for a, ch in root.children.items():
+            parts.append(f"{a}:N={ch.N},W={ch.W:.3f}")
+        print(f"{prefix} | root.N={root.N} | " + " | ".join(parts))
+
+    for i in range(1, iters + 1):
         node = root
         state = node.state
 
+        # If it happens to be dealer's turn at the root, resolve once
         if state.to_move == 'Dealer' and not game.is_terminal(state):
             state = game._dealer_play(state)
             node = MCTSNode(state, node, list(game.actions(state)))
 
+        # Selection
         while not game.is_terminal(state) and not node.untried and node.children:
             a, child = max(node.children.items(), key=lambda kv: ucb(node, kv[1]))
             state = stochastic_step_rng(game, state, a, rng)
             node = child
 
+        # Expansion
         if not game.is_terminal(state) and node.untried:
             a = node.untried.pop()
             next_state = stochastic_step_rng(game, state, a, rng)
@@ -469,37 +459,62 @@ def mcts_core(game: Blackjack,
             node = child
             state = next_state
 
+        # Simulation
         reward = reward_rollout_fn(game, state, rng)
 
+        # Backpropagation
         while node is not None:
             node.N += 1
             node.W += reward
             node = node.parent
 
+        if debug and (i % debug_every == 0 or i == 1):
+            print_children_stats(f"[MCTS] iter {i}/{iters}")
+
     if not root.children:
+        if debug:
+            print("[MCTS] No children expanded; defaulting to STAND")
         return A_STAND
+
+    # Choose action with max visit count; break ties randomly
     maxN = max(ch.N for ch in root.children.values())
     best_actions = [a for a, ch in root.children.items() if ch.N == maxN]
-    return rng.choice(best_actions)
+    choice = rng.choice(best_actions)
 
-# Public distinct MCTS wrappers
+    if debug:
+        print_children_stats("[MCTS] final")
+        print(f"[MCTS] chosen action: {choice}")
 
-def mcts_profit(game: Blackjack, root_state: BJState, iters: int) -> str:
+    return choice
+
+# Public distinct MCTS wrappers (now using random rollouts, with debug passthrough)
+
+def mcts_profit(game: Blackjack, root_state: BJState, iters: int, *,
+                debug: bool = False, debug_every: int = 500) -> str:
     rng = random.Random(secrets.randbits(64))
-    return mcts_core(game, root_state, iters, reward_rollout_fn=rollout_profit, C=math.sqrt(2), rng=rng)
+    return mcts_core(game, root_state, iters,
+                     reward_rollout_fn=rollout_random_ev,
+                     C=math.sqrt(2),
+                     rng=rng,
+                     debug=debug, debug_every=debug_every, reward_metric="ev")
 
-def mcts_win(game: Blackjack, root_state: BJState, iters: int) -> str:
+def mcts_win(game: Blackjack, root_state: BJState, iters: int, *,
+             debug: bool = False, debug_every: int = 500) -> str:
     rng = random.Random(secrets.randbits(64))
-    return mcts_core(game, root_state, iters, reward_rollout_fn=rollout_win, C=math.sqrt(2), rng=rng)
+    return mcts_core(game, root_state, iters,
+                     reward_rollout_fn=rollout_random_win,
+                     C=math.sqrt(2),
+                     rng=rng,
+                     debug=debug, debug_every=debug_every, reward_metric="win")
 
 # Policies
 
-def policy_mcts_profit(game: Blackjack, state: BJState, iters=3000) -> str:
-    return mcts_profit(game, state, iters=iters)
+def policy_mcts_profit(game: Blackjack, state: BJState, iters=3000, *, debug=False, debug_every=500) -> str:
+    return mcts_profit(game, state, iters=iters, debug=debug, debug_every=debug_every)
 
-def policy_mcts_win(game: Blackjack, state: BJState, iters=3000) -> str:
+def policy_mcts_win(game: Blackjack, state: BJState, iters=3000, *, debug=False, debug_every=500) -> str:
     # state for win-agent has no double; insurance is skipped by the runner before policy is queried
-    return mcts_win(game, state, iters=iters)
+    return mcts_win(game, state, iters=iters, debug=debug, debug_every=debug_every)
 
 def policy_expecti_win(game: Blackjack, state: BJState, depth=6) -> str:
     # DOUBLE and INSURANCE are excluded for this agent (handled by runner & action filter in expectiminimax)
@@ -536,7 +551,8 @@ def reconstruct_final_dealer(game: Blackjack) -> Tuple[str, ...]:
 
 # Game Policy: shared dealer, static bet, hidden hole, insurance action on A
 
-def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000, base_bet=50):
+def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000, base_bet=50, *,
+                   debug=False, debug_every=500):
     game = Blackjack(decks=decks, dealer_hits_soft_17=False)
 
     stacks = {'MCTS-Profit': float(starting_chips),
@@ -589,8 +605,12 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4, starting_chips=1000,
         s2 = replace(s2, can_double=False)
         s3 = replace(s3, can_double=False)
 
-        f1, a1 = play_full_hand(game, s1, lambda g, s: policy_mcts_profit(g, s, iters), auto_skip_insurance=False)
-        f2, a2 = play_full_hand(game, s2, lambda g, s: policy_mcts_win(g, s, iters),   auto_skip_insurance=True)
+        f1, a1 = play_full_hand(game, s1,
+                                lambda g, s: policy_mcts_profit(g, s, iters, debug=debug, debug_every=debug_every),
+                                auto_skip_insurance=False)
+        f2, a2 = play_full_hand(game, s2,
+                                lambda g, s: policy_mcts_win(g, s, iters, debug=debug, debug_every=debug_every),
+                                auto_skip_insurance=True)
         f3, a3 = play_full_hand(game, s3, lambda g, s: policy_expecti_win(g, s, depth), auto_skip_insurance=True)
 
         def settle(tag, final_state):
@@ -638,5 +658,7 @@ if __name__ == "__main__":
         depth=6,
         decks=1,
         starting_chips=1000,
-        base_bet=100
+        base_bet=100,
+        debug=True,          # set True to see iteration snapshots
+        debug_every=500       # print every 500 iterations
     )
