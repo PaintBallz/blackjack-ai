@@ -665,12 +665,12 @@ def run_comparison(rounds=10, iteration_budget=2500, depth=6, decks=4, starting_
 if __name__ == "__main__":
     # Defaults tuned down for readable console output. Increase rounds/iterations as desired.
     run_comparison(
-        rounds=25,
-        iteration_budget=9000,
-        depth=6,
+        rounds=500,
+        iteration_budget=8000,
+        depth=8,
         decks=1,
         starting_chips=1000,
         base_bet=100,
-        debug=True,
+        debug=False,
         debug_every=500
     )
