@@ -659,6 +659,6 @@ if __name__ == "__main__":
         decks=1,
         starting_chips=1000,
         base_bet=100,
-        debug=True,          # set True to see iteration snapshots
+        debug=False,          # set True to see iteration snapshots
         debug_every=500       # print every 500 iterations
     )
